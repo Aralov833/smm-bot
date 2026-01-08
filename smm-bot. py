@@ -1,0 +1,145 @@
+import telebot
+import sqlite3
+
+TOKEN = "BOT_TOKEN_BU_YERGA"
+ADMIN_ID = 123456789  # o'zingni ID
+
+bot = telebot.TeleBot(TOKEN)
+
+# ===== DATABASE =====
+db = sqlite3.connect("smm.db", check_same_thread=False)
+sql = db.cursor()
+
+sql.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    balance INTEGER DEFAULT 0
+)
+""")
+
+sql.execute("""
+CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    service TEXT,
+    link TEXT,
+    quantity INTEGER,
+    price INTEGER,
+    status TEXT
+)
+""")
+db.commit()
+
+# ===== SERVICES =====
+services = {
+    "1": {"name": "Telegram Member", "price": 15000},
+    "2": {"name": "Telegram View", "price": 5000},
+    "3": {"name": "Instagram Like", "price": 8000},
+}
+
+# ===== START =====
+@bot.message_handler(commands=['start'])
+def start(msg):
+    sql.execute("INSERT OR IGNORE INTO users(user_id) VALUES(?)", (msg.from_user.id,))
+    db.commit()
+
+    kb = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("🛒 Buyurtma", "💰 Balans")
+    kb.row("📦 Buyurtmalarim", "➕ Balans to‘ldirish")
+
+    bot.send_message(
+        msg.chat.id,
+        "🤖 PRO SMM BOT\nKerakli bo‘limni tanlang:",
+        reply_markup=kb
+    )
+
+# ===== BALANS =====
+@bot.message_handler(func=lambda m: m.text == "💰 Balans")
+def balance(msg):
+    sql.execute("SELECT balance FROM users WHERE user_id=?", (msg.from_user.id,))
+    b = sql.fetchone()[0]
+    bot.send_message(msg.chat.id, f"💰 Balansingiz: {b} so‘m")
+
+# ===== BUYURTMA =====
+@bot.message_handler(func=lambda m: m.text == "🛒 Buyurtma")
+def order(msg):
+    text = "📋 Xizmatlar:\n"
+    for k, v in services.items():
+        text += f"{k}. {v['name']} — {v['price']} so‘m\n"
+    text += "\nXizmat raqamini yozing:"
+    bot.send_message(msg.chat.id, text)
+    bot.register_next_step_handler(msg, order_step1)
+
+def order_step1(msg):
+    if msg.text not in services:
+        bot.send_message(msg.chat.id, "❌ Noto‘g‘ri xizmat")
+        return
+    service_id = msg.text
+    bot.send_message(msg.chat.id, "🔗 Link yuboring:")
+    bot.register_next_step_handler(msg, order_step2, service_id)
+
+def order_step2(msg, service_id):
+    link = msg.text
+    bot.send_message(msg.chat.id, "🔢 Miqdor kiriting:")
+    bot.register_next_step_handler(msg, order_step3, service_id, link)
+
+def order_step3(msg, service_id, link):
+    try:
+        quantity = int(msg.text)
+    except:
+        bot.send_message(msg.chat.id, "❌ Raqam kiriting")
+        return
+
+    price = services[service_id]["price"]
+
+    sql.execute("SELECT balance FROM users WHERE user_id=?", (msg.from_user.id,))
+    balance = sql.fetchone()[0]
+
+    if balance < price:
+        bot.send_message(msg.chat.id, "❌ Balans yetarli emas")
+        return
+
+    sql.execute("""
+    INSERT INTO orders(user_id, service, link, quantity, price, status)
+    VALUES(?,?,?,?,?,?)
+    """, (msg.from_user.id, services[service_id]["name"], link, quantity, price, "Yuborildi"))
+
+    sql.execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (price, msg.from_user.id))
+    db.commit()
+
+    bot.send_message(msg.chat.id, "✅ Buyurtma qabul qilindi")
+
+# ===== BUYURTMALAR =====
+@bot.message_handler(func=lambda m: m.text == "📦 Buyurtmalarim")
+def my_orders(msg):
+    sql.execute("SELECT service, status FROM orders WHERE user_id=?", (msg.from_user.id,))
+    data = sql.fetchall()
+    if not data:
+        bot.send_message(msg.chat.id, "❌ Buyurtma yo‘q")
+        return
+
+    text = "📦 Buyurtmalar:\n"
+    for d in data:
+        text += f"• {d[0]} — {d[1]}\n"
+    bot.send_message(msg.chat.id, text)
+
+# ===== BALANS TOP-UP =====
+@bot.message_handler(func=lambda m: m.text == "➕ Balans to‘ldirish")
+def topup(msg):
+    bot.send_message(msg.chat.id, "💳 To‘lov qiling va admin bilan bog‘laning")
+
+# ===== ADMIN BALANS QO‘SHISH =====
+@bot.message_handler(commands=['addbal'])
+def addbal(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    try:
+        _, user_id, amount = msg.text.split()
+        sql.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (int(amount), int(user_id)))
+        db.commit()
+        bot.send_message(msg.chat.id, "✅ Balans qo‘shildi")
+    except:
+        bot.send_message(msg.chat.id, "❌ /addbal user_id summa")
+
+# ===== RUN =====
+bot.infinity_polling()
